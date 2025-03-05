@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Markdown to A4 PDF Converter (Real-Time)</title>
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind Typography for improved styling -->
+  <link rel="stylesheet" href="https://unpkg.com/@tailwindcss/typography@0.5.0/dist/typography.min.css" />
+  <!-- Marked.js for Markdown parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- html2pdf.js for PDF generation -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.9.3/html2pdf.bundle.min.js"></script>
+  <style>
+    :root {
+      --content-width: 100%;
+    }
+    /* Fixed A4 page preview */
+    .a4-page {
+      position: relative;
+      width: 210mm;
+      height: 297mm;
+      border: 1px solid #ccc;
+      box-shadow: 0 0 5px rgba(0,0,0,0.1);
+      background: #fff;
+      overflow: hidden;
+      padding: 20mm;
+      box-sizing: border-box;
+      margin: 20px auto;
+      page-break-after: always;
+    }
+    .a4-page:last-child {
+      page-break-after: auto;
+    }
+    /* Outer container uses a CSS variable for width (left-aligned) */
+    .page-content {
+      width: var(--content-width, 100%);
+      margin-left: 0;
+      margin-right: 0;
+      height: calc(100% - 15mm);
+      overflow: hidden;
+    }
+    /* Inner container for typography styling */
+    .content-inner {
+      /* Base font-size and line-height will be set inline */
+    }
+    /* Footer paginator at the bottom center */
+    .paginator {
+      position: absolute;
+      bottom: 5mm;
+      left: 0;
+      width: 100%;
+      text-align: center;
+      font-size: 10px;
+      color: #666;
+      pointer-events: none;
+    }
+    /* Hidden temporary container for processing */
+    #temp-container {
+      display: none;
+    }
+    /* Export mode: remove borders, shadows, extra margins */
+    .export-mode #preview-pages {
+      margin: 0;
+      padding: 0;
+    }
+    .export-mode .a4-page {
+      margin: 0 !important;
+      border: none !important;
+      box-shadow: none !important;
+      page-break-after: auto !important;
+    }
+    /* Sticky header for controls with transparent background and no shadow */
+    #sticky-header {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: transparent;
+      padding: 0.5rem 0;
+      box-shadow: none;
+      display: none; /* hidden until content exists */
+    }
+  </style>
+</head>
+<body class="bg-gray-100 text-gray-900">
+  <div class="container mx-auto p-4">
+    <h1 class="text-3xl font-bold mb-4">Markdown to A4 PDF Converter (Real-Time)</h1>
+    
+    <!-- Markdown Input -->
+    <textarea id="markdown-input" class="w-full h-48 p-2 border rounded mb-4" placeholder="Paste your Markdown here..."></textarea>
+    
+    <!-- Sticky header for controls (two sliders & export button) -->
+    <div id="sticky-header" class="mb-4">
+      <div id="scale-slider-container" class="mb-2">
+        <label for="scale-slider" class="block mb-1">
+          Adjust Typography Scale (Font &amp; Line Height): <span id="scale-value">1.00</span>x
+        </label>
+        <input id="scale-slider" type="range" min="0.5" max="2.0" step="0.05" value="1.0" class="w-full">
+      </div>
+      <div id="width-slider-container" class="mb-2">
+        <label for="width-slider" class="block mb-1">
+          Adjust Content Width: <span id="width-value">100%</span>
+        </label>
+        <input id="width-slider" type="range" min="0.5" max="1.0" step="0.01" value="1.0" class="w-full">
+      </div>
+      <div id="save-pdf-button">
+        <button onclick="savePDF()" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
+          Save as PDF
+        </button>
+      </div>
+    </div>
+    
+    <!-- Container for paginated A4 pages preview -->
+    <div id="preview-pages"></div>
+    
+    <!-- Hidden temporary container for processing -->
+    <div id="temp-container"></div>
+  </div>
+  
+  <script>
+    // Base typography settings.
+    const baseFontSize = 14; // pixels
+    const baseLineHeight = 1.5; // unitless multiplier
+    
+    // Global variables for current typography factor and content width.
+    let currentFontFactor = 1.0; // 1.0 = base size
+    let currentContentWidth = 1.0; // 1.0 = 100%
+    let originalHtmlContent = ""; // for re-pagination
+    let conversionDebounce;
+    
+    // Helper: Remove trailing blank pages.
+    function removeTrailingBlankPages() {
+      const previewContainer = document.getElementById("preview-pages");
+      while (previewContainer.lastElementChild) {
+        const inner = previewContainer.lastElementChild.querySelector(".content-inner");
+        if (inner && inner.innerHTML.trim() === "") {
+          previewContainer.removeChild(previewContainer.lastElementChild);
+        } else {
+          break;
+        }
+      }
+    }
+    
+    // Create a new A4 page.
+    function createNewPage() {
+      const page = document.createElement("div");
+      page.className = "a4-page";
+      
+      // Outer container (page-content) with adjustable width.
+      const outer = document.createElement("div");
+      outer.className = "page-content";
+      // Set its width directly.
+      outer.style.width = (currentContentWidth * 100) + "%";
+      
+      // Inner container (content-inner) for typography.
+      const inner = document.createElement("div");
+      inner.className = "content-inner prose prose-sm";
+      // Set explicit font-size (in px) and unitless line-height.
+      inner.style.fontSize = (baseFontSize * currentFontFactor) + "px";
+      inner.style.lineHeight = (baseLineHeight * currentFontFactor).toString();
+      
+      outer.appendChild(inner);
+      page.appendChild(outer);
+      
+      // Footer paginator.
+      const footer = document.createElement("div");
+      footer.className = "paginator";
+      footer.innerText = ""; // To be updated later.
+      page.appendChild(footer);
+      
+      return page;
+    }
+    
+    // Pagination: Break the full HTML into paginated pages.
+    function paginateContent(htmlContent) {
+      const temp = document.getElementById("temp-container");
+      temp.innerHTML = htmlContent;
+      
+      const previewContainer = document.getElementById("preview-pages");
+      previewContainer.innerHTML = "";
+      
+      const nodes = Array.from(temp.childNodes).filter(n => {
+        return (n.nodeType === Node.ELEMENT_NODE) ||
+               (n.nodeType === Node.TEXT_NODE && n.textContent.replace(/\s/g, "") !== "");
+      });
+      
+      let currentPage = createNewPage();
+      previewContainer.appendChild(currentPage);
+      let outer = currentPage.querySelector(".page-content");
+      let inner = currentPage.querySelector(".content-inner");
+      
+      nodes.forEach(node => {
+        const clone = node.cloneNode(true);
+        inner.appendChild(clone);
+        if (outer.scrollHeight > outer.clientHeight && inner.childNodes.length > 1) {
+          inner.removeChild(clone);
+          currentPage = createNewPage();
+          previewContainer.appendChild(currentPage);
+          outer = currentPage.querySelector(".page-content");
+          inner = currentPage.querySelector(".content-inner");
+          inner.appendChild(clone);
+        }
+      });
+      
+      // Remove empty pages.
+      Array.from(previewContainer.children).forEach(page => {
+        if (!page.querySelector(".content-inner").innerHTML.trim()) {
+          page.remove();
+        }
+      });
+      
+      removeTrailingBlankPages();
+      
+      // Update paginator footers.
+      const pages = previewContainer.children;
+      const total = pages.length;
+      Array.from(pages).forEach((page, idx) => {
+        const footer = page.querySelector(".paginator");
+        footer.innerText = `${idx + 1} / ${total}`;
+      });
+    }
+    
+    // Convert Markdown to HTML (via Marked.js) and paginate.
+    function convertMarkdown() {
+      const markdownText = document.getElementById("markdown-input").value;
+      if (markdownText.trim() === "") {
+        document.getElementById("preview-pages").innerHTML = "";
+        document.getElementById("sticky-header").style.display = "none";
+        return;
+      }
+      const htmlContent = marked.parse(markdownText);
+      originalHtmlContent = htmlContent;
+      paginateContent(htmlContent);
+      document.getElementById("sticky-header").style.display = "block";
+    }
+    
+    // Debounced updates for typography and content width.
+    let fontDebounce, widthDebounce;
+    
+    function updateTypography() {
+      currentFontFactor = parseFloat(document.getElementById("scale-slider").value);
+      document.getElementById("scale-value").textContent = currentFontFactor.toFixed(2);
+      paginateContent(originalHtmlContent);
+    }
+    
+    function updateContentWidth() {
+      currentContentWidth = parseFloat(document.getElementById("width-slider").value);
+      document.getElementById("width-value").textContent = Math.round(currentContentWidth * 100) + "%";
+      paginateContent(originalHtmlContent);
+    }
+    
+    document.getElementById("scale-slider").addEventListener("input", function() {
+      clearTimeout(fontDebounce);
+      fontDebounce = setTimeout(updateTypography, 300);
+    });
+    
+    document.getElementById("width-slider").addEventListener("input", function() {
+      clearTimeout(widthDebounce);
+      widthDebounce = setTimeout(updateContentWidth, 300);
+    });
+    
+    // Auto-convert as user types.
+    document.getElementById("markdown-input").addEventListener("input", function() {
+      clearTimeout(conversionDebounce);
+      conversionDebounce = setTimeout(convertMarkdown, 300);
+    });
+    
+    // Export PDF.
+    function savePDF() {
+      const previewPages = document.getElementById("preview-pages");
+      removeTrailingBlankPages();
+      document.body.classList.add("export-mode");
+      const options = {
+        margin: 0,
+        filename: 'document.pdf',
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, backgroundColor: '#fff' },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      };
+      html2pdf().set(options).from(previewPages).save().then(() => {
+        document.body.classList.remove("export-mode");
+      });
+    }
+  </script>
+</body>
+</html>
